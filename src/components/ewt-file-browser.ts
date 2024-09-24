@@ -80,7 +80,7 @@ export class EwtCFileBrowser extends HTMLElement {
               console.log("Received chunk: " + value);
             });
           });
-          const reader = this.port.readable!.pipeThrough(new TransformStream(new Uint8LineBreakTransformer())).getReader();
+          const reader = this.port.readable!.getReader();
           while (true) {
             const { value, done } = await reader.read();
             if (done) {
@@ -225,7 +225,7 @@ export class EwtCFileBrowser extends HTMLElement {
 
       data = data.slice(beginIndex + 4);
 
-      console.log("Data is: " + data);
+      console.log("Data is: ", data);
 
       if (data.length < 8) {
         if (noMoreHeaderDataCount > 10) {
