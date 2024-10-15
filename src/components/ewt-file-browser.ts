@@ -113,6 +113,7 @@ export class EwtCFileBrowser extends HTMLElement {
             }
             if (value) {
               console.log("Received raw bytes:", value);
+              console.log("Raw bytes text: " + new TextDecoder().decode(value));
               if (this._consoleBuffer[this._consoleBuffer.length - 1] === 13 && value[0] === 10) {
                 let dynamicArray = Array.from(this._consoleBuffer!.subarray(0, this._consoleBuffer.length - 1)).concat(Array.from(value));
                 this._consoleBuffer = new Uint8Array(dynamicArray);
@@ -135,7 +136,7 @@ export class EwtCFileBrowser extends HTMLElement {
 
   private async _fetchFilesAndDirectories() {
     this._consoleBuffer = new Uint8Array();
-    await this._sendCommand(this._path == "" ? "ls" : "ls " + this._path);
+    await this._sendCommand(this._path == "" ? "ls" : "ls " + '"' + this._path + '"');
     const result = new TextDecoder().decode(await this._getCommandResult());
     if (result === undefined) {
       console.log("Failed to fetch files");
@@ -158,15 +159,21 @@ export class EwtCFileBrowser extends HTMLElement {
   }
 
   private async _deleteFile(filePath: string) {
-    await this._sendCommand("rm " + filePath);
-    await this._fetchFilesAndDirectories();
+    await this._sendCommand("rm \"" + filePath + '"');
+    const result = await this._getCommandResult();
+    if (result === undefined || (result[0] == 75 && result[1] == 79)) { // KO
+      console.log("Failed to delete file");
+      return undefined;
+    } else {
+      await this._fetchFilesAndDirectories();
+    }
   }
 
   private async _downloadFile(filePath: string) {
     console.log("Downloading file: " + filePath);
 
     this._consoleBuffer = new Uint8Array();
-    await this._sendCommand("download " + filePath);
+    await this._sendCommand("download \"" + filePath + '"');
     let baseResult = await this._getCommandResult();
     if (baseResult === undefined) {
       console.log("Failed to download file");
@@ -227,7 +234,7 @@ export class EwtCFileBrowser extends HTMLElement {
       let offset = 0;
       while (offset < fileSize) {
         console.log("creating chunk")
-        const chunkSize = Math.min(2048, fileSize - offset);
+        const chunkSize = Math.min(256, fileSize - offset);
 
         let dataToSend = data.slice(offset, offset + chunkSize);
 
@@ -258,7 +265,7 @@ export class EwtCFileBrowser extends HTMLElement {
       console.log("Chunks prepared for upload");
 
       this._consoleBuffer = new Uint8Array();
-      await this._sendCommand("upload " + this._path + "/" + file.name + " " + fileSize);
+      await this._sendCommand("upload \"" + this._path + "/" + file.name + "\" " + fileSize);
       let baseResult = await this._getCommandResult();
       if (baseResult === undefined) {
         console.log("Failed to upload file");
@@ -276,17 +283,26 @@ export class EwtCFileBrowser extends HTMLElement {
         const dataToSend = chunksToSend[i];
 
         await this._sendRawCommand(dataToSend);
-        console.log("Sent chunk");
+        console.log("Sent chunk " + i + " of " + chunksToSend.length);
         let chunkSendResult = await this._getCommandResult();
-        if (chunkSendResult === undefined) { // TODO: retry
+        if (chunkSendResult === undefined) {
           console.log("Failed to upload file");
           return undefined;
+        } else if (Number(chunkSendResult[0]) == 82 && Number(chunkSendResult[1]) == 69) { // RE -> send the chunk again
+          i--;
+          console.log("Failed to upload chunk, retrying...");
+          continue;
         } else if (chunkSendResult[0] != 79 || chunkSendResult[1] != 75) { // OK
           console.log("Failed to upload file");
           return undefined;
         }
 
         console.log("Chunk sent successfully");
+      }
+
+      const operationResult = await this._getCommandResult();
+      if (operationResult == undefined || (operationResult[0] == 75 && operationResult[1] == 79)) {
+        console.log("Failed to upload file (weird)...")
       }
 
       await this._fetchFilesAndDirectories();
@@ -296,8 +312,9 @@ export class EwtCFileBrowser extends HTMLElement {
   private async _sendCommand(command: string) {
     const encoder = new TextEncoder();
     const writer = this.port.writable!.getWriter();
+    console.log("Sending command: ", encoder.encode(command + "\n"));
     await writer.write(encoder.encode(command + "\n"));
-    await sleep(100);
+    await sleep(50);
     try {
       writer.releaseLock();
     } catch (err) {
@@ -307,8 +324,9 @@ export class EwtCFileBrowser extends HTMLElement {
 
  private async _sendRawCommand(command: Uint8Array) {
     const writer = this.port.writable!.getWriter();
+    console.log("Sending raw command: ", command);
     await writer.write(command);
-    await sleep(100);
+    await sleep(50);
     try {
       writer.releaseLock();
     } catch (err) {
