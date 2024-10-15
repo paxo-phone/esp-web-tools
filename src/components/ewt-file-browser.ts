@@ -46,10 +46,35 @@ export class EwtCFileBrowser extends HTMLElement {
           outline: none;
         }
       </style>
-      <div class="file-browser"></div>
+      <div class="file-browser" ></div>
     `;
 
     this._fileBrowser = new FileBrowser(this.shadowRoot!.querySelector(".file-browser")!, this._downloadFile.bind(this), this._deleteFile.bind(this), this._goToDirectory.bind(this));
+
+
+    this._fileBrowser!.targetElement.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      //this._fileBrowser!.targetElement.appendChild(document.createTextNode("File(s) dropped"));
+    });
+    
+    this._fileBrowser!.targetElement.addEventListener('dragleave', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      //this._fileBrowser!.targetElement.removeChild(this._fileBrowser!.targetElement.lastChild!);
+    });
+    this._fileBrowser!.targetElement.addEventListener("drop", (event) => {
+      event.preventDefault();
+      //event.stopPropagation();
+      const files = event.dataTransfer!.files;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        console.log("Uploading file: " + file.name);
+
+        this._uploadFile(file);
+      }
+    }, false);
+    //this._fileBrowser!.targetElement.addEventListener("change", FileSelectHandler, false);
 
     const abortController = new AbortController();
     const connection = this._connect(abortController.signal);
@@ -189,6 +214,85 @@ export class EwtCFileBrowser extends HTMLElement {
     }, 100);
   }
 
+  private async _uploadFile(file: File) {
+    const reader = new FileReader();
+    reader.readAsArrayBuffer(file);
+
+    reader.onloadend = async () => {
+      const data = new Uint8Array(reader.result as ArrayBuffer);
+      const fileSize = data.length;
+
+      let chunksToSend = [];
+
+      let offset = 0;
+      while (offset < fileSize) {
+        console.log("creating chunk")
+        const chunkSize = Math.min(2048, fileSize - offset);
+
+        let dataToSend = data.slice(offset, offset + chunkSize);
+
+        let checksum = 0;
+
+        for (let i = 0; i < dataToSend.length; i++) {
+          checksum = (checksum + dataToSend[i]) % 4294967295;
+        }
+
+        const beginArray = new Uint8Array([0xff, 0xfe, 0xfd]); 
+
+        const bufferSizeArray = new Uint8Array([chunkSize & 0xff, (chunkSize >> 8) & 0xff]);
+
+        const optionsArray = new Uint8Array([0x00, 0x00]);
+
+        const checksumBytes = new Uint8Array([
+          checksum & 0xff,
+          (checksum >> 8) & 0xff,
+          (checksum >> 16) & 0xff,
+          (checksum >> 24) & 0xff,
+        ]);
+
+        chunksToSend.push(new Uint8Array([...beginArray, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
+
+        offset += chunkSize;
+      }
+
+      console.log("Chunks prepared for upload");
+
+      this._consoleBuffer = new Uint8Array();
+      await this._sendCommand("upload " + this._path + "/" + file.name + " " + fileSize);
+      let baseResult = await this._getCommandResult();
+      if (baseResult === undefined) {
+        console.log("Failed to upload file");
+        return undefined;
+      }
+
+      if (baseResult[0] != 79 || baseResult[1] != 75) { // OK
+        console.log("Failed to upload file");
+        return undefined;
+      }
+
+      console.log("Upload confirmed")
+
+      for (let i = 0; i < chunksToSend.length; i++) {
+        const dataToSend = chunksToSend[i];
+
+        await this._sendRawCommand(dataToSend);
+        console.log("Sent chunk");
+        let chunkSendResult = await this._getCommandResult();
+        if (chunkSendResult === undefined) { // TODO: retry
+          console.log("Failed to upload file");
+          return undefined;
+        } else if (chunkSendResult[0] != 79 || chunkSendResult[1] != 75) { // OK
+          console.log("Failed to upload file");
+          return undefined;
+        }
+
+        console.log("Chunk sent successfully");
+      }
+
+      await this._fetchFilesAndDirectories();
+    }
+  }
+
   private async _sendCommand(command: string) {
     const encoder = new TextEncoder();
     const writer = this.port.writable!.getWriter();
@@ -200,6 +304,17 @@ export class EwtCFileBrowser extends HTMLElement {
       console.error("Ignoring release lock error", err);
     }
  }
+
+ private async _sendRawCommand(command: Uint8Array) {
+    const writer = this.port.writable!.getWriter();
+    await writer.write(command);
+    await sleep(100);
+    try {
+      writer.releaseLock();
+    } catch (err) {
+      console.error("Ignoring release lock error", err);
+    }
+  }
 
   // _fetchCommandResult that fetches new data from the serial port and returns it
   private async _getCommandResult(): Promise<Uint8Array | undefined> {
