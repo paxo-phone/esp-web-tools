@@ -46,11 +46,18 @@ export class EwtCFileBrowser extends HTMLElement {
           outline: none;
         }
       </style>
+      <button id="addDirectory">+</button>
       <div class="file-browser" ></div>
     `;
 
     this._fileBrowser = new FileBrowser(this.shadowRoot!.querySelector(".file-browser")!, this._downloadFile.bind(this), this._deleteFile.bind(this), this._goToDirectory.bind(this));
 
+    this.shadowRoot!.querySelector("#addDirectory")!.addEventListener("click", () => {
+      let newDirectoryName = prompt("Enter the name of the new directory.");
+      if (newDirectoryName) {
+        this._createDirectory(newDirectoryName);
+      }
+    });
 
     this._fileBrowser!.targetElement.addEventListener('dragover', (event) => {
       event.preventDefault();
@@ -66,13 +73,47 @@ export class EwtCFileBrowser extends HTMLElement {
     this._fileBrowser!.targetElement.addEventListener("drop", (event) => {
       event.preventDefault();
       //event.stopPropagation();
-      const files = event.dataTransfer!.files;
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        console.log("Uploading file: " + file.name);
 
-        this._uploadFile(file);
+
+      const items = event.dataTransfer!.items;
+      let files: Array<FileSystemFileEntry> = [];
+      let directories: Array<FileSystemDirectoryEntry> = [];
+
+      const supportsWebkitGetAsEntry = 'webkitGetAsEntry' in DataTransferItem.prototype;
+      if (supportsWebkitGetAsEntry) {
+        for (let i = 0; i < items.length; i++) {
+          let directory = items[i].webkitGetAsEntry() as FileSystemDirectoryEntry;
+          if (directory) {
+            directories.push(directory);
+          } else {
+            let file = items[i].webkitGetAsEntry() as FileSystemFileEntry;
+
+            if (file) {
+              files.push(file);
+            }
+          }
       }
+
+      (async () => {
+        for (let i = 0; i < files.length; i++) {
+          const fileEntry = files[i];
+          console.log("Uploading file: " + fileEntry.name);
+
+          const file = await new Promise<File>((resolve, _) => {
+            fileEntry.file((file) => {
+              resolve(file);
+            });
+          });
+
+          await this._uploadFile(file);
+        }
+
+        for (let i = 0; i < directories.length; i++) {
+          const directory = directories[i];
+          console.log("Uploading directory: " + directory.name);
+          await this._uploadDirectory(directory);
+        }
+      })();
     }, false);
     //this._fileBrowser!.targetElement.addEventListener("change", FileSelectHandler, false);
 
@@ -84,7 +125,9 @@ export class EwtCFileBrowser extends HTMLElement {
     };
     const target = async () => {
         await this._sendCommand("sm disable");
+        await this._getCommandResult();
         await this._sendCommand("console lock");
+        await this._getCommandResult();
         await this._fetchFilesAndDirectories();
     };
     target();
@@ -113,7 +156,7 @@ export class EwtCFileBrowser extends HTMLElement {
             }
             if (value) {
               console.log("Received raw bytes:", value);
-              console.log("Raw bytes text: " + new TextDecoder().decode(value));
+              //console.log("Raw bytes text: " + new TextDecoder().decode(value));
               if (this._consoleBuffer[this._consoleBuffer.length - 1] === 13 && value[0] === 10) {
                 let dynamicArray = Array.from(this._consoleBuffer!.subarray(0, this._consoleBuffer.length - 1)).concat(Array.from(value));
                 this._consoleBuffer = new Uint8Array(dynamicArray);
@@ -135,8 +178,18 @@ export class EwtCFileBrowser extends HTMLElement {
   }
 
   private async _fetchFilesAndDirectories() {
+    const result = await this._fetchFilesAndDirectoriesForPath(this._path);
+
+    if (result === undefined) {
+      return;
+    }
+
+    this._fileBrowser!.setFilesAndDirectories(result.files, result.directories, this._path);
+  }
+
+  private async _fetchFilesAndDirectoriesForPath(path: string): Promise<{ files: string[], directories: string[] } | undefined> {
     this._consoleBuffer = new Uint8Array();
-    await this._sendCommand(this._path == "" ? "ls" : "ls " + '"' + this._path + '"');
+    await this._sendCommand(path == "" ? "ls" : "ls " + '"' + path + '"');
     const result = new TextDecoder().decode(await this._getCommandResult());
     if (result === undefined) {
       console.log("Failed to fetch files");
@@ -150,12 +203,25 @@ export class EwtCFileBrowser extends HTMLElement {
     this._files = files;
     this._directories = directories;
 
-    this._fileBrowser!.setFilesAndDirectories(files, directories, this._path);
+    return { files, directories };
   }
 
   private async _goToDirectory(directory: string) {
     this._path = directory;
     await this._fetchFilesAndDirectories();
+  }
+
+  private async _createDirectory(directory: string) {
+    let newPath = this._path + "/" + directory;
+
+    await this._sendCommand("mkdir \"" + newPath + '"');
+    const result = await this._getCommandResult();
+    if (result === undefined || (result[0] == 75 && result[1] == 79)) { // KO
+      console.log("Failed to create directory");
+      return undefined;
+    } else {
+      await this._fetchFilesAndDirectories();
+    }
   }
 
   private async _deleteFile(filePath: string) {
@@ -221,12 +287,70 @@ export class EwtCFileBrowser extends HTMLElement {
     }, 100);
   }
 
-  private async _uploadFile(file: File) {
-    const reader = new FileReader();
-    reader.readAsArrayBuffer(file);
+  private async _uploadDirectory(directory: FileSystemDirectoryEntry, path: string = this._path) {
+    // check if the directory exists in the paxo
 
-    reader.onloadend = async () => {
-      const data = new Uint8Array(reader.result as ArrayBuffer);
+    let currentDirItemsList = await this._fetchFilesAndDirectoriesForPath(path);
+
+    if (currentDirItemsList === undefined) {
+      console.log("Failed to upload directory");
+      return;
+    }
+
+    if (currentDirItemsList.files.includes(directory.name)) {
+      console.log("File with the same name already exists, skipping...");
+      return;
+    }
+
+    if (!currentDirItemsList.directories.includes(directory.name)) {
+      await this._createDirectory(directory.name);
+    }
+
+    // upload files in it
+
+    const entries = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+      directory.createReader().readEntries((entries) => {
+        resolve(entries);
+      });
+    });
+
+    this._path = path + "/" + directory.name;
+    this._fetchFilesAndDirectories();
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (entry.isFile) {
+        const fileEntry = entry as FileSystemFileEntry;
+
+        // convert to File
+
+        const file = await new Promise<File>((resolve, _) => {
+          fileEntry.file((file) => {
+            resolve(file);
+          });
+        });
+
+        await this._uploadFile(file, path + "/" + directory.name);
+      } else if (entry.isDirectory) {
+        const dir = entry as FileSystemDirectoryEntry;
+        await this._uploadDirectory(dir, path + "/" + directory.name);
+      }
+    }
+  } 
+
+  private async _uploadFile(file: File, path: string = this._path) {
+      const data = await new Promise<Uint8Array>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsArrayBuffer(file);
+    
+        reader.onloadend = () => {
+          if (reader.error) {
+            reject(reader.error);
+          } else {
+            resolve(new Uint8Array(reader.result as ArrayBuffer));
+          }
+        };
+      });
       const fileSize = data.length;
 
       let chunksToSend = [];
@@ -265,7 +389,7 @@ export class EwtCFileBrowser extends HTMLElement {
       console.log("Chunks prepared for upload");
 
       this._consoleBuffer = new Uint8Array();
-      await this._sendCommand("upload \"" + this._path + "/" + file.name + "\" " + fileSize);
+      await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
       let baseResult = await this._getCommandResult();
       if (baseResult === undefined) {
         console.log("Failed to upload file");
@@ -306,14 +430,14 @@ export class EwtCFileBrowser extends HTMLElement {
       }
 
       await this._fetchFilesAndDirectories();
-    }
   }
 
   private async _sendCommand(command: string) {
     const encoder = new TextEncoder();
     const writer = this.port.writable!.getWriter();
     console.log("Sending command: ", encoder.encode(command + "\n"));
-    await writer.write(encoder.encode(command + "\n"));
+    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...encoder.encode(command + "\n")]));
+    //await writer.write(encoder.encode(command + "\n"));
     await sleep(50);
     try {
       writer.releaseLock();
@@ -325,7 +449,8 @@ export class EwtCFileBrowser extends HTMLElement {
  private async _sendRawCommand(command: Uint8Array) {
     const writer = this.port.writable!.getWriter();
     console.log("Sending raw command: ", command);
-    await writer.write(command);
+    await writer .write(new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
+    //await writer.write(command);
     await sleep(50);
     try {
       writer.releaseLock();

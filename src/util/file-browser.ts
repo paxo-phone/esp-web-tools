@@ -38,6 +38,14 @@
       directoryElement.classList.add("directory");
       directoryElement.textContent = directory;
 
+        const binIcon = document.createElement("span");
+        binIcon.classList.add("icon");
+        binIcon.textContent = "🗑";
+        binIcon.onclick = () => {
+            this._deleteCallback(this._getFilePath(directory));
+        }
+        directoryElement.appendChild(binIcon);
+
         const icon = document.createElement("span");
         icon.classList.add("icon");
         icon.textContent = "→";
