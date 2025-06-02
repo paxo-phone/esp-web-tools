@@ -19,6 +19,8 @@ export class EwtCFileBrowser extends HTMLElement {
   private _consoleBuffer = new Uint8Array();
   private _cancelConnection?: () => Promise<void>;
 
+  private debug = true;
+
   public connectedCallback() {
     const shadowRoot = this.attachShadow({ mode: "open" });
 
@@ -55,7 +57,7 @@ export class EwtCFileBrowser extends HTMLElement {
     this.shadowRoot!.querySelector("#addDirectory")!.addEventListener("click", () => {
       let newDirectoryName = prompt("Enter the name of the new directory.");
       if (newDirectoryName) {
-        this._createDirectory(newDirectoryName);
+        this._createDirectory(this._path + "/" + newDirectoryName);
       }
     });
 
@@ -83,15 +85,16 @@ export class EwtCFileBrowser extends HTMLElement {
       if (supportsWebkitGetAsEntry) {
         for (let i = 0; i < items.length; i++) {
           let directory = items[i].webkitGetAsEntry() as FileSystemDirectoryEntry;
-          if (directory) {
+          if (directory.isDirectory) {
             directories.push(directory);
-          } else {
+          } else if (directory.isFile) {
             let file = items[i].webkitGetAsEntry() as FileSystemFileEntry;
 
             if (file) {
               files.push(file);
             }
           }
+        }
       }
 
       (async () => {
@@ -155,8 +158,10 @@ export class EwtCFileBrowser extends HTMLElement {
               break;
             }
             if (value) {
-              console.log("Received raw bytes:", value);
-              //console.log("Raw bytes text: " + new TextDecoder().decode(value));
+              if (this.debug) {
+                console.log("Received raw bytes:", value);
+                console.log("Raw bytes text: " + new TextDecoder().decode(value));
+              }
               if (this._consoleBuffer[this._consoleBuffer.length - 1] === 13 && value[0] === 10) {
                 let dynamicArray = Array.from(this._consoleBuffer!.subarray(0, this._consoleBuffer.length - 1)).concat(Array.from(value));
                 this._consoleBuffer = new Uint8Array(dynamicArray);
@@ -187,14 +192,19 @@ export class EwtCFileBrowser extends HTMLElement {
     this._fileBrowser!.setFilesAndDirectories(result.files, result.directories, this._path);
   }
 
-  private async _fetchFilesAndDirectoriesForPath(path: string): Promise<{ files: string[], directories: string[] } | undefined> {
+  private async _fetchFilesAndDirectoriesForPath(path: string, retryCount: number = 0): Promise<{ files: string[], directories: string[] } | undefined> {
     this._consoleBuffer = new Uint8Array();
     await this._sendCommand(path == "" ? "ls" : "ls " + '"' + path + '"');
-    const result = new TextDecoder().decode(await this._getCommandResult());
-    if (result === undefined) {
-      console.log("Failed to fetch files");
+    const encodedResult = await this._getCommandResult();
+    if (encodedResult === undefined || (encodedResult[0] == 75 && encodedResult[1] == 79)) { // KO
+      if (retryCount < 3) {
+        console.log("Failed to fetch files, retrying...");
+        return this._fetchFilesAndDirectoriesForPath(path, retryCount + 1);
+      }
+      console.log("Failed to fetch files after 3 retries, giving up.");
       return undefined;
     }
+    const result = new TextDecoder().decode(encodedResult);
     const json = JSON.parse(result);
 
     const files = json.files;
@@ -211,10 +221,8 @@ export class EwtCFileBrowser extends HTMLElement {
     await this._fetchFilesAndDirectories();
   }
 
-  private async _createDirectory(directory: string) {
-    let newPath = this._path + "/" + directory;
-
-    await this._sendCommand("mkdir \"" + newPath + '"');
+  private async _createDirectory(path: string) {
+    await this._sendCommand("mkdir \"" + path + '"');
     const result = await this._getCommandResult();
     if (result === undefined || (result[0] == 75 && result[1] == 79)) { // KO
       console.log("Failed to create directory");
@@ -303,7 +311,7 @@ export class EwtCFileBrowser extends HTMLElement {
     }
 
     if (!currentDirItemsList.directories.includes(directory.name)) {
-      await this._createDirectory(directory.name);
+      await this._createDirectory(path + "/" + directory.name);
     }
 
     // upload files in it
@@ -315,7 +323,7 @@ export class EwtCFileBrowser extends HTMLElement {
     });
 
     this._path = path + "/" + directory.name;
-    this._fetchFilesAndDirectories();
+    await this._fetchFilesAndDirectories();
 
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -338,7 +346,7 @@ export class EwtCFileBrowser extends HTMLElement {
     }
   } 
 
-  private async _uploadFile(file: File, path: string = this._path) {
+  private async _uploadFile(file: File, path: string = this._path, retry: number = 0) {
       const data = await new Promise<Uint8Array>((resolve, reject) => {
         const reader = new FileReader();
         reader.readAsArrayBuffer(file);
@@ -391,13 +399,12 @@ export class EwtCFileBrowser extends HTMLElement {
       this._consoleBuffer = new Uint8Array();
       await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
       let baseResult = await this._getCommandResult();
-      if (baseResult === undefined) {
-        console.log("Failed to upload file");
-        return undefined;
-      }
-
-      if (baseResult[0] != 79 || baseResult[1] != 75) { // OK
-        console.log("Failed to upload file");
+      if (baseResult === undefined || (baseResult[0] == 75 && baseResult[1] == 79)) { // KO
+        if (retry < 3) {
+          console.log("Failed to upload file, retrying...");
+          return this._uploadFile(file, path, retry + 1);
+        }
+        console.log("Failed to upload file after 3 retries, giving up.");
         return undefined;
       }
 
@@ -407,7 +414,7 @@ export class EwtCFileBrowser extends HTMLElement {
         const dataToSend = chunksToSend[i];
 
         await this._sendRawCommand(dataToSend);
-        console.log("Sent chunk " + i + " of " + chunksToSend.length);
+        console.log("Sent chunk " + (i + 1) + " of " + chunksToSend.length);
         let chunkSendResult = await this._getCommandResult();
         if (chunkSendResult === undefined) {
           console.log("Failed to upload file");
@@ -434,28 +441,32 @@ export class EwtCFileBrowser extends HTMLElement {
 
   private async _sendCommand(command: string) {
     const encoder = new TextEncoder();
+    console.log("Sending command: ", command);
+    await this._sendRawCommand(encoder.encode(command + "\n"));
+  }
+
+ private async _sendRawCommand(command: Uint8Array) {
+    let commandId = Math.random().toString(36).substring(2, 10);
+    if (this.debug) {
+      console.log("trying to aquire lock for command", commandId, "with command", command);
+      console.trace();
+    }
     const writer = this.port.writable!.getWriter();
-    console.log("Sending command: ", encoder.encode(command + "\n"));
-    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...encoder.encode(command + "\n")]));
-    //await writer.write(encoder.encode(command + "\n"));
+    if (this.debug) {
+      console.log("Sending raw command: ", commandId, command);
+    }
+    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
     await sleep(50);
     try {
       writer.releaseLock();
+      if (this.debug) {
+        console.log("Lock for command", commandId, "released successfully");
+      }
     } catch (err) {
       console.error("Ignoring release lock error", err);
     }
- }
-
- private async _sendRawCommand(command: Uint8Array) {
-    const writer = this.port.writable!.getWriter();
-    console.log("Sending raw command: ", command);
-    await writer .write(new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
-    //await writer.write(command);
-    await sleep(50);
-    try {
-      writer.releaseLock();
-    } catch (err) {
-      console.error("Ignoring release lock error", err);
+    if (this.debug) {
+      console.log("Command", commandId, "sent successfully", command);
     }
   }
 
@@ -477,13 +488,15 @@ export class EwtCFileBrowser extends HTMLElement {
         noMoreHeaderDataCount++;
         this._consoleBuffer = new Uint8Array();
 
-        await sleep(100);
+        await sleep(20);
         continue;
       }
 
       data = data.slice(beginIndex + 4);
 
-      console.log("Data is: ", data);
+      if (this.debug) {
+        console.log("Data is: ", data);
+      }
 
       if (data.length < 8) {
         if (noMoreHeaderDataCount > 10) {
@@ -492,7 +505,7 @@ export class EwtCFileBrowser extends HTMLElement {
         }
         console.log("Not enough data yet, waiting for more, expecting at least 8 bytes, got " + data.length + " bytes.");
         noMoreHeaderDataCount++;
-        await sleep(100);
+        await sleep(20);
         continue;
       }
 
