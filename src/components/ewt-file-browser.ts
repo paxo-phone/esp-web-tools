@@ -378,6 +378,12 @@ export class EwtCFileBrowser extends HTMLElement {
 
         const beginArray = new Uint8Array([0xff, 0xfe, 0xfd]); 
 
+        // 8 random bytes for the command ID in a Uint8Array
+        const commandId = new Uint8Array(8);
+        for (let i = 0; i < commandId.length; i++) {
+          commandId[i] = Math.floor(Math.random() * 256);
+        }
+
         const bufferSizeArray = new Uint8Array([chunkSize & 0xff, (chunkSize >> 8) & 0xff]);
 
         const optionsArray = new Uint8Array([0x00, 0x00]);
@@ -389,7 +395,7 @@ export class EwtCFileBrowser extends HTMLElement {
           (checksum >> 24) & 0xff,
         ]);
 
-        chunksToSend.push(new Uint8Array([...beginArray, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
+        chunksToSend.push(new Uint8Array([...beginArray, ...commandId, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
 
         offset += chunkSize;
       }
@@ -447,15 +453,19 @@ export class EwtCFileBrowser extends HTMLElement {
 
  private async _sendRawCommand(command: Uint8Array) {
     let commandId = Math.random().toString(36).substring(2, 10);
+    // convert to UInt8Array
+    let encodedCommandId = new TextEncoder().encode(commandId);
+    encodedCommandId = new Uint8Array([...encodedCommandId, ...new Uint8Array(8 - encodedCommandId.length)]); // pad with zeros to 8 bytes
+
     if (this.debug) {
       console.log("trying to aquire lock for command", commandId, "with command", command);
       console.trace();
     }
     const writer = this.port.writable!.getWriter();
     if (this.debug) {
-      console.log("Sending raw command: ", commandId, command);
+      console.log("Sending raw command: ", commandId, new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
     }
-    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
+    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
     await sleep(50);
     try {
       writer.releaseLock();
@@ -498,7 +508,7 @@ export class EwtCFileBrowser extends HTMLElement {
         console.log("Data is: ", data);
       }
 
-      if (data.length < 8) {
+      if (data.length < 16) {
         if (noMoreHeaderDataCount > 10) {
           console.log("No more data available, returning undefined");
           return undefined;
@@ -512,12 +522,19 @@ export class EwtCFileBrowser extends HTMLElement {
       noMoreHeaderDataCount = 0;
 
       const encodedData = data;
-      const length = encodedData[0] + (encodedData[1] << 8);
-      const options = encodedData[2] + (encodedData[3] << 8);
-      const pseudoHash = encodedData[4] + (encodedData[5] << 8) + (encodedData[6] << 16) + (encodedData[7] << 24);
+      let cursor = 0;
+      const commandId = encodedData.slice(cursor, cursor + 8);
+      console.log("Command ID: ", new TextDecoder().decode(commandId));
+      cursor += 8;
+      const length = encodedData[cursor] + (encodedData[cursor + 1] << 8);
+      cursor += 2;
+      const options = encodedData[cursor] + (encodedData[cursor + 1] << 8);
+      cursor += 2;
+      const pseudoHash = encodedData[cursor] + (encodedData[cursor + 1] << 8) + (encodedData[cursor + 2] << 16) + (encodedData[cursor + 3] << 24);
+      cursor += 4;
 
       // remove the header from the data
-      if (encodedData.length < length + 8) {
+      if (encodedData.length < length + 16) {
         if (noMoreDataCount > 10) {
           console.log("No more data available, returning undefined");
           return undefined;
@@ -530,7 +547,7 @@ export class EwtCFileBrowser extends HTMLElement {
 
       noMoreDataCount = 0;
 
-      const dataWithoutHeader = encodedData.slice(8, length + 8);
+      const dataWithoutHeader = encodedData.slice(cursor, length + cursor);
       
       let calculatedHash = 0;
 
@@ -538,7 +555,7 @@ export class EwtCFileBrowser extends HTMLElement {
         calculatedHash = (calculatedHash + dataWithoutHeader[i]) % 4294967295;
       }
 
-      this._consoleBuffer = encodedData.slice(length + 8);
+      this._consoleBuffer = encodedData.slice(length + cursor);
 
       if (calculatedHash != pseudoHash) {
         console.log("Hashes do not match, data corrupted");
