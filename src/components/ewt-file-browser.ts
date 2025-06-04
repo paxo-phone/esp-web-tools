@@ -16,7 +16,83 @@ export class EwtCFileBrowser extends HTMLElement {
 
   private _fileBrowser?: FileBrowser;
 
-  private _consoleBuffer = new Uint8Array();
+  private __consoleBuffer = new Uint8Array();
+
+  private get _consoleBuffer(): Uint8Array {
+    return this.__consoleBuffer;
+  }
+
+  private set _consoleBuffer(newBuffer: Uint8Array) {
+    // detect if new full packets have been added to the buffer
+
+    const {packets, rest} = this._getPackets(newBuffer);
+
+    for (const packet of packets) {
+      const commandId = packet.commandId;
+      const packetContent = packet.packetContent;
+
+      this._receivedPackets.set(commandId, packetContent);
+    }
+
+    this.__consoleBuffer = rest;
+  }
+
+  private _receivedPackets = new Map<string, Uint8Array>();
+
+  private _getPackets(buffer: Uint8Array): {packets: Array<{commandId: string, packetContent: Uint8Array}>, rest: Uint8Array} {
+    let packets: {commandId: string, packetContent: Uint8Array}[] = [];
+
+    var rest = buffer;
+
+    while (true) {
+      const beginIndex = findSubarrayIndex(rest, new Uint8Array([0xff, 0xfe, 0xfd]));
+      if (beginIndex === undefined) {
+        break;
+      }
+
+      let packet = rest.slice(beginIndex + 3);
+      if (packet.length < 16) {
+        // Not enough data yet, waiting for more, expecting at least 16 bytes
+        break;
+      }
+
+      let cursor = 0;
+      const commandId = new TextDecoder().decode(packet.slice(cursor, cursor + 8));
+      cursor += 8;
+      const length = packet[cursor++] + (packet[cursor++] << 8);
+      const options = packet[cursor++] + (packet[cursor++] << 8);
+      const pseudoHash = packet[cursor++] + (packet[cursor++] << 8) + (packet[cursor++] << 16) + (packet[cursor++] << 24);
+
+      packet = packet.slice(cursor);
+
+      if (packet.length < length) {
+        // Not enough data yet, waiting for more, expecting at least "length" bytes
+        break;
+      }
+
+      rest = packet.slice(length);
+      packet = packet.slice(0, length);
+
+      if (this.debug) {
+        console.log("Found packet with command ID: ", commandId, Array.from(new TextEncoder().encode(commandId)).map(b => b.toString(16).padStart(2, '0')).join(''), ", length: ", length, ", options: ", options, ", pseudoHash: ", pseudoHash, packet);
+      }
+
+      let calculatedHash = 0;
+      for (let i = 0; i < length; i++) {
+        calculatedHash = (calculatedHash + packet[i]) % 4294967295;
+      }
+      if (calculatedHash !== pseudoHash) {
+        console.log("Hashes do not match, data corrupted");
+        continue;
+      }
+
+      packets.push({commandId: commandId, packetContent: packet});
+    }
+
+    return {packets: packets, rest: rest};
+  }
+
+
   private _cancelConnection?: () => Promise<void>;
 
   private debug = true;
@@ -127,15 +203,14 @@ export class EwtCFileBrowser extends HTMLElement {
       return connection;
     };
     const target = async () => {
-        await this._sendCommand("sm disable");
-        await this._getCommandResult();
-        await this._sendCommand("console lock");
-        await this._getCommandResult();
+        const com1 = await this._sendCommand("sm disable");
+        await this._getCommandResult(com1);
+        const com2 = await this._sendCommand("console lock");
+        console.log("console lock", await this._getCommandResult(com2));
         await this._fetchFilesAndDirectories();
     };
     target();
   }
-
   private async _connect(abortSignal: AbortSignal) {
     this.logger.debug("Starting console read loop");
     this.logger.debug("Fetching files");
@@ -194,8 +269,8 @@ export class EwtCFileBrowser extends HTMLElement {
 
   private async _fetchFilesAndDirectoriesForPath(path: string, retryCount: number = 0): Promise<{ files: string[], directories: string[] } | undefined> {
     this._consoleBuffer = new Uint8Array();
-    await this._sendCommand(path == "" ? "ls" : "ls " + '"' + path + '"');
-    const encodedResult = await this._getCommandResult();
+    const commandId = await this._sendCommand(path == "" ? "ls" : "ls " + '"' + path + '"');
+    const encodedResult = await this._getCommandResult(commandId);
     if (encodedResult === undefined || (encodedResult[0] == 75 && encodedResult[1] == 79)) { // KO
       if (retryCount < 3) {
         console.log("Failed to fetch files, retrying...");
@@ -222,8 +297,8 @@ export class EwtCFileBrowser extends HTMLElement {
   }
 
   private async _createDirectory(path: string) {
-    await this._sendCommand("mkdir \"" + path + '"');
-    const result = await this._getCommandResult();
+    const commandId = await this._sendCommand("mkdir \"" + path + '"');
+    const result = await this._getCommandResult(commandId);
     if (result === undefined || (result[0] == 75 && result[1] == 79)) { // KO
       console.log("Failed to create directory");
       return undefined;
@@ -233,8 +308,8 @@ export class EwtCFileBrowser extends HTMLElement {
   }
 
   private async _deleteFile(filePath: string) {
-    await this._sendCommand("rm \"" + filePath + '"');
-    const result = await this._getCommandResult();
+    const commandId = await this._sendCommand("rm \"" + filePath + '"');
+    const result = await this._getCommandResult(commandId);
     if (result === undefined || (result[0] == 75 && result[1] == 79)) { // KO
       console.log("Failed to delete file");
       return undefined;
@@ -247,8 +322,12 @@ export class EwtCFileBrowser extends HTMLElement {
     console.log("Downloading file: " + filePath);
 
     this._consoleBuffer = new Uint8Array();
-    await this._sendCommand("download \"" + filePath + '"');
-    let baseResult = await this._getCommandResult();
+    let commandId = Math.random().toString(36).substring(2, 9);
+    let encodedCommandId = new TextEncoder().encode(commandId);
+    encodedCommandId = new Uint8Array([...encodedCommandId, 0x00]); // pad with zeros to 8 bytes
+    commandId = new TextDecoder().decode(encodedCommandId);
+    await this._sendCommand("download \"" + filePath + '"', commandId);
+    let baseResult = await this._getCommandResult(commandId);
     if (baseResult === undefined) {
       console.log("Failed to download file");
       return undefined;
@@ -263,8 +342,17 @@ export class EwtCFileBrowser extends HTMLElement {
 
     let recoveredData = new Uint8Array();
 
+    let count = 1;
+
     while (recoveredData.length < fileSize) {
-      const dataResult = await this._getCommandResult();
+      let newCommandId = encodedCommandId.slice(0, 6);
+      let count16Byte = new Uint8Array(2);
+      count16Byte[0] = (count >> 8) & 0xff;
+      count16Byte[1] = count & 0xff;
+      newCommandId = new Uint8Array([...newCommandId, ...count16Byte]); // pad with zeros to 8 bytes
+      count++;
+      console.log("expecting packet with command ID: ", Array.from(newCommandId).map(b => b.toString(16).padStart(2, '0')).join(''));
+      const dataResult = await this._getCommandResult(new TextDecoder().decode(newCommandId));
       if (dataResult === undefined) {
         console.log("Failed to download file");
         return undefined;
@@ -361,7 +449,7 @@ export class EwtCFileBrowser extends HTMLElement {
       });
       const fileSize = data.length;
 
-      let chunksToSend = [];
+      let chunksToSend: Array<{commandId: string, packet: Uint8Array}> = [];
 
       let offset = 0;
       while (offset < fileSize) {
@@ -380,6 +468,9 @@ export class EwtCFileBrowser extends HTMLElement {
 
         const bufferSizeArray = new Uint8Array([chunkSize & 0xff, (chunkSize >> 8) & 0xff]);
 
+        const commandId = Math.random().toString(36).substring(2, 10);
+        const encodedCommandId = new TextEncoder().encode(commandId);
+
         const optionsArray = new Uint8Array([0x00, 0x00]);
 
         const checksumBytes = new Uint8Array([
@@ -389,7 +480,7 @@ export class EwtCFileBrowser extends HTMLElement {
           (checksum >> 24) & 0xff,
         ]);
 
-        chunksToSend.push(new Uint8Array([...beginArray, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
+        chunksToSend.push({commandId: commandId, packet: new Uint8Array([...beginArray, ...bufferSizeArray, ...encodedCommandId, ...optionsArray, ...checksumBytes, ...dataToSend])});
 
         offset += chunkSize;
       }
@@ -399,7 +490,7 @@ export class EwtCFileBrowser extends HTMLElement {
       this._consoleBuffer = new Uint8Array();
       let commandId = await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
       console.log("Command ID: %s", commandId);
-      let baseResult = await this._getCommandResult();
+      let baseResult = await this._getCommandResult(commandId);
       if (baseResult === undefined || (baseResult[0] == 75 && baseResult[1] == 79)) { // KO
         if (retry < 3) {
           console.log("Failed to upload file, retrying...");
@@ -414,9 +505,9 @@ export class EwtCFileBrowser extends HTMLElement {
       for (let i = 0; i < chunksToSend.length; i++) {
         const dataToSend = chunksToSend[i];
 
-        await this._sendRawCommand(dataToSend, commandId, false);
+        await this._sendRawCommand(dataToSend.packet, dataToSend.commandId, false);
         console.log("Sent chunk " + (i + 1) + " of " + chunksToSend.length);
-        let chunkSendResult = await this._getCommandResult();
+        let chunkSendResult = await this._getCommandResult(dataToSend.commandId);
         if (chunkSendResult === undefined) {
           console.log("Failed to upload file");
           return undefined;
@@ -432,7 +523,7 @@ export class EwtCFileBrowser extends HTMLElement {
         console.log("Chunk sent successfully");
       }
 
-      const operationResult = await this._getCommandResult();
+      const operationResult = await this._getCommandResult(commandId);
       if (operationResult == undefined || (operationResult[0] == 75 && operationResult[1] == 79)) {
         console.log("Failed to upload file (weird)...")
       }
@@ -440,10 +531,10 @@ export class EwtCFileBrowser extends HTMLElement {
       await this._fetchFilesAndDirectories();
   }
 
-  private async _sendCommand(command: string): Promise<string> {
+  private async _sendCommand(command: string, commandId: string | undefined = undefined): Promise<string> {
     const encoder = new TextEncoder();
     console.log("Sending command: ", command);
-    return await this._sendRawCommand(encoder.encode(command + "\n"));
+    return await this._sendRawCommand(encoder.encode(command + "\n"), commandId);
   }
 
  private async _sendRawCommand(command: Uint8Array, commandId: string | undefined = undefined, includeCommandId: boolean = true): Promise<string> {
@@ -488,89 +579,25 @@ export class EwtCFileBrowser extends HTMLElement {
   }
 
   // _fetchCommandResult that fetches new data from the serial port and returns it
-  private async _getCommandResult(): Promise<Uint8Array | undefined> {
-    let noMoreHeaderDataCount = 0;
-    let noMoreDataCount = 0;
+  private async _getCommandResult(commandId: string): Promise<Uint8Array | undefined> {
+    this.logger.debug("Waiting for command result for command ID: ", commandId);
+    const timeout = 2000; // 2 seconds timeout
+    const startTime = Date.now();
+
     while (true) {
-      let data = this._consoleBuffer;
-
-      const beginIndex = findSubarrayIndex(data, new Uint8Array([0xff, 0xfe, 0xfd]));
-
-      if (beginIndex === undefined) {
-        if (noMoreHeaderDataCount > 10) {
-          console.log("No more data available, returning undefined");
-          return undefined;
-        }
-        console.log("No command result found, waiting for more data");
-        noMoreHeaderDataCount++;
-        this._consoleBuffer = new Uint8Array();
-
-        await sleep(20);
-        continue;
+      if (this._receivedPackets.has(commandId)) {
+        const packetContent = this._receivedPackets.get(commandId)!;
+        this._receivedPackets.delete(commandId);
+        this.logger.debug("Received command result for command ID: ", commandId);
+        return packetContent;
       }
 
-      data = data.slice(beginIndex + 3);
-
-      if (this.debug) {
-        console.log("Data is: ", data);
-        console.log("Bytes text: " + new TextDecoder().decode(data));
-      }
-
-      if (data.length < 16) {
-        if (noMoreHeaderDataCount > 10) {
-          console.log("No more data available, returning undefined");
-          return undefined;
-        }
-        console.log("Not enough data yet, waiting for more, expecting at least 8 bytes, got " + data.length + " bytes.");
-        noMoreHeaderDataCount++;
-        await sleep(20);
-        continue;
-      }
-
-      noMoreHeaderDataCount = 0;
-
-      const encodedData = data;
-      let cursor = 0;
-      const commandId = encodedData.slice(cursor, cursor + 8);
-      console.log("Command ID: ", new TextDecoder().decode(commandId));
-      cursor += 8;
-      const length = encodedData[cursor] + (encodedData[cursor + 1] << 8);
-      cursor += 2;
-      const options = encodedData[cursor] + (encodedData[cursor + 1] << 8);
-      cursor += 2;
-      const pseudoHash = encodedData[cursor] + (encodedData[cursor + 1] << 8) + (encodedData[cursor + 2] << 16) + (encodedData[cursor + 3] << 24);
-      cursor += 4;
-
-      // remove the header from the data
-      if (encodedData.length < length + 16) {
-        if (noMoreDataCount > 10) {
-          console.log("No more data available, returning undefined");
-          return undefined;
-        }
-        console.log("Not enough data yet, waiting for more, expecting " + (length + 8) + " bytes, got " + data.length + " bytes.");
-        noMoreDataCount++;
-        await sleep(100);
-        continue;
-      } 
-
-      noMoreDataCount = 0;
-
-      const dataWithoutHeader = encodedData.slice(cursor, length + cursor);
-      
-      let calculatedHash = 0;
-
-      for (let i = 0; i < length; i++) {
-        calculatedHash = (calculatedHash + dataWithoutHeader[i]) % 4294967295;
-      }
-
-      this._consoleBuffer = encodedData.slice(length + cursor);
-
-      if (calculatedHash != pseudoHash) {
-        console.log("Hashes do not match, data corrupted");
+      if (Date.now() - startTime > timeout) {
+        console.log("Timeout waiting for command result for command ID: ", commandId);
         return undefined;
       }
 
-      return dataWithoutHeader;
+      await sleep(10); // wait before checking again
     }
   }
 
