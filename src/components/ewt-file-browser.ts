@@ -159,8 +159,8 @@ export class EwtCFileBrowser extends HTMLElement {
             }
             if (value) {
               if (this.debug) {
-                console.log("Received raw bytes:", value);
-                console.log("Raw bytes text: " + new TextDecoder().decode(value));
+                //console.log("Received raw bytes:", value);
+                //console.log("Raw bytes text: " + new TextDecoder().decode(value));
               }
               if (this._consoleBuffer[this._consoleBuffer.length - 1] === 13 && value[0] === 10) {
                 let dynamicArray = Array.from(this._consoleBuffer!.subarray(0, this._consoleBuffer.length - 1)).concat(Array.from(value));
@@ -378,12 +378,6 @@ export class EwtCFileBrowser extends HTMLElement {
 
         const beginArray = new Uint8Array([0xff, 0xfe, 0xfd]); 
 
-        // 8 random bytes for the command ID in a Uint8Array
-        const commandId = new Uint8Array(8);
-        for (let i = 0; i < commandId.length; i++) {
-          commandId[i] = Math.floor(Math.random() * 256);
-        }
-
         const bufferSizeArray = new Uint8Array([chunkSize & 0xff, (chunkSize >> 8) & 0xff]);
 
         const optionsArray = new Uint8Array([0x00, 0x00]);
@@ -395,7 +389,7 @@ export class EwtCFileBrowser extends HTMLElement {
           (checksum >> 24) & 0xff,
         ]);
 
-        chunksToSend.push(new Uint8Array([...beginArray, ...commandId, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
+        chunksToSend.push(new Uint8Array([...beginArray, ...bufferSizeArray, ...optionsArray, ...checksumBytes, ...dataToSend]));
 
         offset += chunkSize;
       }
@@ -403,7 +397,8 @@ export class EwtCFileBrowser extends HTMLElement {
       console.log("Chunks prepared for upload");
 
       this._consoleBuffer = new Uint8Array();
-      await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
+      let commandId = await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
+      console.log("Command ID: %s", commandId);
       let baseResult = await this._getCommandResult();
       if (baseResult === undefined || (baseResult[0] == 75 && baseResult[1] == 79)) { // KO
         if (retry < 3) {
@@ -419,7 +414,7 @@ export class EwtCFileBrowser extends HTMLElement {
       for (let i = 0; i < chunksToSend.length; i++) {
         const dataToSend = chunksToSend[i];
 
-        await this._sendRawCommand(dataToSend);
+        await this._sendRawCommand(dataToSend, commandId, false);
         console.log("Sent chunk " + (i + 1) + " of " + chunksToSend.length);
         let chunkSendResult = await this._getCommandResult();
         if (chunkSendResult === undefined) {
@@ -445,14 +440,17 @@ export class EwtCFileBrowser extends HTMLElement {
       await this._fetchFilesAndDirectories();
   }
 
-  private async _sendCommand(command: string) {
+  private async _sendCommand(command: string): Promise<string> {
     const encoder = new TextEncoder();
     console.log("Sending command: ", command);
-    await this._sendRawCommand(encoder.encode(command + "\n"));
+    return await this._sendRawCommand(encoder.encode(command + "\n"));
   }
 
- private async _sendRawCommand(command: Uint8Array) {
-    let commandId = Math.random().toString(36).substring(2, 10);
+ private async _sendRawCommand(command: Uint8Array, commandId: string | undefined = undefined, includeCommandId: boolean = true): Promise<string> {
+    if (commandId === undefined) {
+      commandId = Math.random().toString(36).substring(2, 10);
+    }
+
     // convert to UInt8Array
     let encodedCommandId = new TextEncoder().encode(commandId);
     encodedCommandId = new Uint8Array([...encodedCommandId, ...new Uint8Array(8 - encodedCommandId.length)]); // pad with zeros to 8 bytes
@@ -463,10 +461,18 @@ export class EwtCFileBrowser extends HTMLElement {
     }
     const writer = this.port.writable!.getWriter();
     if (this.debug) {
-      console.log("Sending raw command: ", commandId, new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
+      if (includeCommandId) {
+        console.log("Sending command: ", commandId, new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
+      } else {
+        console.log("Sending command without ID: ", new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
+      }
     }
-    await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
-    await sleep(50);
+    if (includeCommandId) {
+      await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...encodedCommandId, ...command]));
+    } else {
+      await writer.write(new Uint8Array([0xff, 0xfe, 0xfd, ...command]));
+    }
+    await sleep(20);
     try {
       writer.releaseLock();
       if (this.debug) {
@@ -478,6 +484,7 @@ export class EwtCFileBrowser extends HTMLElement {
     if (this.debug) {
       console.log("Command", commandId, "sent successfully", command);
     }
+    return commandId;
   }
 
   // _fetchCommandResult that fetches new data from the serial port and returns it
@@ -502,10 +509,11 @@ export class EwtCFileBrowser extends HTMLElement {
         continue;
       }
 
-      data = data.slice(beginIndex + 4);
+      data = data.slice(beginIndex + 3);
 
       if (this.debug) {
         console.log("Data is: ", data);
+        console.log("Bytes text: " + new TextDecoder().decode(data));
       }
 
       if (data.length < 16) {
