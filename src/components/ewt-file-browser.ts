@@ -234,8 +234,8 @@ export class EwtCFileBrowser extends HTMLElement {
             }
             if (value) {
               if (this.debug) {
-                //console.log("Received raw bytes:", value);
-                //console.log("Raw bytes text: " + new TextDecoder().decode(value));
+                console.log("Received raw bytes:", value);
+                console.log("Raw bytes text: " + new TextDecoder().decode(value));
               }
               if (this._consoleBuffer[this._consoleBuffer.length - 1] === 13 && value[0] === 10) {
                 let dynamicArray = Array.from(this._consoleBuffer!.subarray(0, this._consoleBuffer.length - 1)).concat(Array.from(value));
@@ -449,12 +449,13 @@ export class EwtCFileBrowser extends HTMLElement {
       });
       const fileSize = data.length;
 
-      let chunksToSend: Array<{commandId: string, packet: Uint8Array}> = [];
+      let chunksToSend: Array<Uint8Array> = [];
 
       let offset = 0;
+      let packetCount = 0;
       while (offset < fileSize) {
         console.log("creating chunk")
-        const chunkSize = Math.min(256, fileSize - offset);
+        const chunkSize = Math.min(1024, fileSize - offset);
 
         let dataToSend = data.slice(offset, offset + chunkSize);
 
@@ -464,12 +465,10 @@ export class EwtCFileBrowser extends HTMLElement {
           checksum = (checksum + dataToSend[i]) % 4294967295;
         }
 
-        const beginArray = new Uint8Array([0xff, 0xfe, 0xfd]); 
-
         const bufferSizeArray = new Uint8Array([chunkSize & 0xff, (chunkSize >> 8) & 0xff]);
 
-        const commandId = Math.random().toString(36).substring(2, 10);
-        const encodedCommandId = new TextEncoder().encode(commandId);
+        //const commandId = Math.random().toString(36).substring(2, 10);
+        //const encodedCommandId = new TextEncoder().encode(commandId);
 
         const optionsArray = new Uint8Array([0x00, 0x00]);
 
@@ -480,7 +479,9 @@ export class EwtCFileBrowser extends HTMLElement {
           (checksum >> 24) & 0xff,
         ]);
 
-        chunksToSend.push({commandId: commandId, packet: new Uint8Array([...beginArray, ...bufferSizeArray, ...encodedCommandId, ...optionsArray, ...checksumBytes, ...dataToSend])});
+        const packetIndexBytes = new Uint8Array([packetCount & 0xff, (packetCount >> 8) & 0xff]);
+
+        chunksToSend.push(new Uint8Array([...bufferSizeArray, ...optionsArray, ...checksumBytes, ...packetIndexBytes,  ...dataToSend]));
 
         offset += chunkSize;
       }
@@ -488,7 +489,7 @@ export class EwtCFileBrowser extends HTMLElement {
       console.log("Chunks prepared for upload");
 
       this._consoleBuffer = new Uint8Array();
-      let commandId = await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
+      const commandId = await this._sendCommand("upload \"" + path + "/" + file.name + "\" " + fileSize);
       console.log("Command ID: %s", commandId);
       let baseResult = await this._getCommandResult(commandId);
       if (baseResult === undefined || (baseResult[0] == 75 && baseResult[1] == 79)) { // KO
@@ -505,9 +506,9 @@ export class EwtCFileBrowser extends HTMLElement {
       for (let i = 0; i < chunksToSend.length; i++) {
         const dataToSend = chunksToSend[i];
 
-        await this._sendRawCommand(dataToSend.packet, dataToSend.commandId, false);
+        await this._sendRawCommand(dataToSend, commandId);
         console.log("Sent chunk " + (i + 1) + " of " + chunksToSend.length);
-        let chunkSendResult = await this._getCommandResult(dataToSend.commandId);
+        let chunkSendResult = await this._getCommandResult(commandId);
         if (chunkSendResult === undefined) {
           console.log("Failed to upload file");
           return undefined;
@@ -525,7 +526,13 @@ export class EwtCFileBrowser extends HTMLElement {
 
       const operationResult = await this._getCommandResult(commandId);
       if (operationResult == undefined || (operationResult[0] == 75 && operationResult[1] == 79)) {
-        console.log("Failed to upload file (weird)...")
+        if (retry < 3) {
+          await this._deleteFile(path + "/" + file.name);
+          console.log("Failed to upload file, retrying...");
+          return await this._uploadFile(file, path, retry + 1);
+        }
+        console.log("Failed to upload file after 3 retries, giving up.");
+        return undefined;
       }
 
       await this._fetchFilesAndDirectories();
@@ -543,7 +550,7 @@ export class EwtCFileBrowser extends HTMLElement {
     }
 
     // convert to UInt8Array
-    let encodedCommandId = new TextEncoder().encode(commandId);
+    let encodedCommandId = new TextEncoder().encode(commandId.substring(0, 8));
     encodedCommandId = new Uint8Array([...encodedCommandId, ...new Uint8Array(8 - encodedCommandId.length)]); // pad with zeros to 8 bytes
 
     if (this.debug) {
@@ -581,7 +588,7 @@ export class EwtCFileBrowser extends HTMLElement {
   // _fetchCommandResult that fetches new data from the serial port and returns it
   private async _getCommandResult(commandId: string): Promise<Uint8Array | undefined> {
     this.logger.debug("Waiting for command result for command ID: ", commandId);
-    const timeout = 2000; // 2 seconds timeout
+    const timeout = 5000; // 5 seconds timeout
     const startTime = Date.now();
 
     while (true) {
