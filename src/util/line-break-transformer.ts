@@ -21,7 +21,9 @@ export class LineBreakTransformer implements Transformer<string, string> {
   }
 }
 
-export class Uint8LineBreakTransformer implements Transformer<Uint8Array, Uint8Array> {
+export class Uint8LineBreakTransformer
+  implements Transformer<Uint8Array, Uint8Array>
+{
   private chunks = new Uint8Array();
 
   transform(
@@ -34,7 +36,10 @@ export class Uint8LineBreakTransformer implements Transformer<Uint8Array, Uint8A
     newChunks.set(chunk, this.chunks.length);
     this.chunks = newChunks;
     // For each line breaks in chunks, send the parsed lines out.
-    let toModifyIndex = findSubarrayIndex(this.chunks, new Uint8Array([13, 10]));
+    let toModifyIndex = findSubarrayIndex(
+      this.chunks,
+      new Uint8Array([13, 10]),
+    );
 
     while (toModifyIndex !== undefined) {
       const beginning = this.chunks.slice(0, toModifyIndex);
@@ -46,7 +51,11 @@ export class Uint8LineBreakTransformer implements Transformer<Uint8Array, Uint8A
       this.chunks.set([10], beginning.length);
       this.chunks.set(end, beginning.length + 1);
 
-      toModifyIndex = findSubarrayIndex(this.chunks, new Uint8Array([13, 10]), toModifyIndex - 1);
+      toModifyIndex = findSubarrayIndex(
+        this.chunks,
+        new Uint8Array([13, 10]),
+        toModifyIndex - 1,
+      );
     }
 
     controller.enqueue(this.chunks);

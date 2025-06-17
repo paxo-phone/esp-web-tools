@@ -784,12 +784,17 @@ export class EwtInstallDialog extends LitElement {
 
     content = html`
       <div slot="content">
-        <ewt-file-browser .port=${this.port} .logger=${this.logger}></ewt-file-browser>
+        <ewt-file-browser
+          .port=${this.port}
+          .logger=${this.logger}
+        ></ewt-file-browser>
       </div>
       <div slot="actions">
         <ew-text-button
           @click=${async () => {
-            await this.shadowRoot!.querySelector("ewt-file-browser")!.disconnect();
+            await this.shadowRoot!.querySelector(
+              "ewt-file-browser",
+            )!.disconnect();
             this._state = "DASHBOARD";
             this._initialize();
           }}
