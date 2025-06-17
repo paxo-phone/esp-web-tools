@@ -2,12 +2,8 @@
     constructor(public targetElement: HTMLElement, private _downloadCallback: (path: string) => void, private _deleteCallback: (path: string) => void, private _goToDirectory: (path: string) => void) {}
 
     private _path = "";
-    private _files: string[] = [];
-    private _directories: string[] = [];
 
     setFilesAndDirectories(files: string[], directories: string[], path: string) {
-        this._files = files;
-        this._directories = directories;
         this._path = path;
 
       this.targetElement.innerHTML = "";

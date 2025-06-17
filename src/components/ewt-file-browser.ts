@@ -11,8 +11,6 @@ export class EwtCFileBrowser extends HTMLElement {
   public allowInput = true;
 
   private _path = "";
-  private _files: string[] = [];
-  private _directories: string[] = [];
 
   private _fileBrowser?: FileBrowser;
 
@@ -285,9 +283,6 @@ export class EwtCFileBrowser extends HTMLElement {
     const files = json.files;
     const directories = json.directories;
 
-    this._files = files;
-    this._directories = directories;
-
     return { files, directories };
   }
 
@@ -495,10 +490,11 @@ export class EwtCFileBrowser extends HTMLElement {
       if (baseResult === undefined || (baseResult[0] == 75 && baseResult[1] == 79)) { // KO
         if (retry < 3) {
           console.log("Failed to upload file, retrying...");
-          return this._uploadFile(file, path, retry + 1);
+          this._uploadFile(file, path, retry + 1);
+          return;
         }
         console.log("Failed to upload file after 3 retries, giving up.");
-        return undefined;
+        return;
       }
 
       console.log("Upload confirmed")
@@ -511,14 +507,14 @@ export class EwtCFileBrowser extends HTMLElement {
         let chunkSendResult = await this._getCommandResult(commandId);
         if (chunkSendResult === undefined) {
           console.log("Failed to upload file");
-          return undefined;
+          return;
         } else if (Number(chunkSendResult[0]) == 82 && Number(chunkSendResult[1]) == 69) { // RE -> send the chunk again
           i--;
           console.log("Failed to upload chunk, retrying...");
           continue;
         } else if (chunkSendResult[0] != 79 || chunkSendResult[1] != 75) { // OK
           console.log("Failed to upload file");
-          return undefined;
+          return;
         }
 
         console.log("Chunk sent successfully");
@@ -529,10 +525,11 @@ export class EwtCFileBrowser extends HTMLElement {
         if (retry < 3) {
           await this._deleteFile(path + "/" + file.name);
           console.log("Failed to upload file, retrying...");
-          return await this._uploadFile(file, path, retry + 1);
+          await this._uploadFile(file, path, retry + 1);
+          return;
         }
         console.log("Failed to upload file after 3 retries, giving up.");
-        return undefined;
+        return;
       }
 
       await this._fetchFilesAndDirectories();
