@@ -18,6 +18,8 @@ import "./pages/ewt-page-message";
 import {
   closeIcon,
   listItemConsole,
+  listItemEraseUserData,
+  listItemFundDevelopment,
   listItemHomeAssistant,
   listItemInstallIcon,
   listItemVisitDevice,
@@ -41,7 +43,7 @@ import { version } from "./version";
 import type { EwFilledSelect } from "./components/ew-filled-select";
 
 console.log(
-  `ESP Web Tools ${version} by Nabu Casa; https://esphome.github.io/esp-web-tools/`,
+  `ESP Web Tools ${version} by Open Home Foundation; https://esphome.github.io/esp-web-tools/`,
 );
 
 const ERROR_ICON = "⚠️";
@@ -300,6 +302,7 @@ export class EwtInstallDialog extends LitElement {
                   href=${this._manifest.funding_url}
                   target="_blank"
                 >
+                  ${listItemFundDevelopment}
                   <div slot="headline">Fund Development</div>
                 </ew-list-item>
               `
@@ -311,6 +314,7 @@ export class EwtInstallDialog extends LitElement {
                   class="danger"
                   @click=${() => this._startInstall(true)}
                 >
+                  ${listItemEraseUserData}
                   <div slot="headline">Erase User Data</div>
                 </ew-list-item>
               `
@@ -975,13 +979,13 @@ export class EwtInstallDialog extends LitElement {
         if (state.state === FlashStateType.FINISHED) {
           sleep(100)
             // Flashing closes the port
-            .then(() => this.port.open({ baudRate: 115200 }))
+            .then(() => this.port.open({ baudRate: 115200, bufferSize: 8192 }))
             .then(() => this._initialize(true))
             .then(() => this.requestUpdate());
         } else if (state.state === FlashStateType.ERROR) {
           sleep(100)
             // Flashing closes the port
-            .then(() => this.port.open({ baudRate: 115200 }));
+            .then(() => this.port.open({ baudRate: 115200, bufferSize: 8192 }));
         }
       },
       this.port,

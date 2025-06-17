@@ -6,20 +6,7 @@ import {
   Manifest,
   FlashStateType,
 } from "./const";
-import { sleep } from "./util/sleep";
-
-const resetTransport = async (transport: Transport) => {
-  await transport.device.setSignals({
-    dataTerminalReady: false,
-    requestToSend: true,
-  });
-  await sleep(250);
-  await transport.device.setSignals({
-    dataTerminalReady: false,
-    requestToSend: false,
-  });
-  await sleep(250);
-};
+import { hardReset } from "./util/reset";
 
 export const flash = async (
   onEvent: (state: FlashState) => void,
@@ -67,26 +54,13 @@ export const flash = async (
         "Failed to initialize. Try resetting your device or holding the BOOT button while clicking INSTALL.",
       details: { error: FlashError.FAILED_INITIALIZING, details: err },
     });
-    await resetTransport(transport);
+
+    await hardReset(transport);
     await transport.disconnect();
     return;
   }
 
   chipFamily = esploader.chip.CHIP_NAME as any;
-
-  if (!esploader.chip.ROM_TEXT) {
-    fireStateEvent({
-      state: FlashStateType.ERROR,
-      message: `Chip ${chipFamily} is not supported`,
-      details: {
-        error: FlashError.NOT_SUPPORTED,
-        details: `Chip ${chipFamily} is not supported`,
-      },
-    });
-    await resetTransport(transport);
-    await transport.disconnect();
-    return;
-  }
 
   fireStateEvent({
     state: FlashStateType.INITIALIZING,
@@ -102,7 +76,7 @@ export const flash = async (
       message: `Your ${chipFamily} board is not supported.`,
       details: { error: FlashError.NOT_SUPPORTED, details: chipFamily },
     });
-    await resetTransport(transport);
+    await hardReset(transport);
     await transport.disconnect();
     return;
   }
@@ -149,7 +123,7 @@ export const flash = async (
           details: err.message,
         },
       });
-      await resetTransport(transport);
+      await hardReset(transport);
       await transport.disconnect();
       return;
     }
@@ -227,7 +201,7 @@ export const flash = async (
       message: err.message,
       details: { error: FlashError.WRITE_FAILED, details: err },
     });
-    await resetTransport(transport);
+    await hardReset(transport);
     await transport.disconnect();
     return;
   }
@@ -242,9 +216,8 @@ export const flash = async (
     },
   });
 
-  await sleep(100);
-  console.log("HARD RESET");
-  await resetTransport(transport);
+  await hardReset(transport);
+
   console.log("DISCONNECT");
   await transport.disconnect();
 
