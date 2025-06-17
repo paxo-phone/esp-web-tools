@@ -6,6 +6,7 @@ import "./components/ew-list-item";
 import "./components/ew-divider";
 import "./components/ew-checkbox";
 import "./components/ewt-console";
+import "./components/ewt-file-browser";
 import "./components/ew-dialog";
 import "./components/ew-icon-button";
 import "./components/ew-filled-text-field";
@@ -75,6 +76,7 @@ export class EwtInstallDialog extends LitElement {
     | "PROVISION"
     | "INSTALL"
     | "ASK_ERASE"
+    | "FILE_BROWSER"
     | "LOGS" = "DASHBOARD";
 
   @state() private _installErase = false;
@@ -109,7 +111,8 @@ export class EwtInstallDialog extends LitElement {
     if (
       this._client === undefined &&
       this._state !== "INSTALL" &&
-      this._state !== "LOGS"
+      this._state !== "LOGS" &&
+      this._state !== "FILE_BROWSER"
     ) {
       if (this._error) {
         [heading, content] = this._renderError(this._error);
@@ -130,6 +133,8 @@ export class EwtInstallDialog extends LitElement {
       [heading, content] = this._renderProvision();
     } else if (this._state === "LOGS") {
       [heading, content] = this._renderLogs();
+    } else if (this._state === "FILE_BROWSER") {
+      [heading, content] = this._renderFileBrowser();
     }
 
     return html`
@@ -274,6 +279,22 @@ export class EwtInstallDialog extends LitElement {
             ${listItemConsole}
             <div slot="headline">Logs & Console</div>
           </ew-list-item>
+          <ew-list-item
+            type="button"
+            @click=${async () => {
+              const client = this._client;
+              if (client) {
+                await this._closeClientWithoutEvents(client);
+                await sleep(100);
+              }
+              // Also set `null` back to undefined.
+              this._client = undefined;
+              this._state = "FILE_BROWSER";
+            }}
+          >
+            ${listItemConsole}
+            <div slot="headline">File Browser</div>
+          </ew-list-item>
           ${this._isSameFirmware && this._manifest.funding_url
             ? html`
                 <ew-list-item
@@ -336,6 +357,17 @@ export class EwtInstallDialog extends LitElement {
           >
             ${listItemConsole}
             <div slot="headline">Logs & Console</div>
+          </ew-list-item>
+          <ew-list-item
+            type="button"
+            @click=${async () => {
+              // Also set `null` back to undefined.
+              this._client = undefined;
+              this._state = "FILE_BROWSER";
+            }}
+          >
+            ${listItemConsole}
+            <div slot="headline">File Browser</div>
           </ew-list-item>
         </ew-list>
       </div>
@@ -734,6 +766,30 @@ export class EwtInstallDialog extends LitElement {
         <ew-text-button
           @click=${async () => {
             await this.shadowRoot!.querySelector("ewt-console")!.disconnect();
+            this._state = "DASHBOARD";
+            this._initialize();
+          }}
+        >
+          Back
+        </ew-text-button>
+      </div>
+    `;
+
+    return [heading, content!];
+  }
+
+  _renderFileBrowser(): [string | undefined, TemplateResult] {
+    let heading: string | undefined = `File Browser`;
+    let content: TemplateResult;
+
+    content = html`
+      <div slot="content">
+        <ewt-file-browser .port=${this.port} .logger=${this.logger}></ewt-file-browser>
+      </div>
+      <div slot="actions">
+        <ew-text-button
+          @click=${async () => {
+            await this.shadowRoot!.querySelector("ewt-file-browser")!.disconnect();
             this._state = "DASHBOARD";
             this._initialize();
           }}
